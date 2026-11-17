@@ -8,10 +8,12 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
+	ginkgotypes "github.com/onsi/ginkgo/v2/types"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
 	routeclient "github.com/openshift/client-go/route/clientset/versioned"
@@ -83,40 +85,115 @@ func TestE2e(t *testing.T) {
 //
 // - KUBECONFIG is the location of the kubeconfig file to use
 func onlyHCPProxySelected() bool {
-	filter := ginkgo.GinkgoLabelFilter()
+	return hcpProxyOnlyFilter(ginkgo.GinkgoLabelFilter())
+}
+
+var hcpProxyFilterLabels = map[string]bool{
+	"hcp-proxy": true,
+	"acm-38016": true,
+	"acm-37268": true,
+	"acm-37269": true,
+	"acm-39216": true,
+	"acm-39226": true,
+	"acm-39227": true,
+	"acm-39228": true,
+	"acm-42875": true,
+}
+
+func hcpProxyOnlyFilter(filter string) bool {
+	filter = strings.TrimSpace(filter)
 	if filter == "" {
 		return false
 	}
-	proxyLabels := ginkgo.Label(
-		"hcp-proxy", "ACM-38016",
-		"ACM-37268", "ACM-37269",
-		"ACM-39216", "ACM-39226", "ACM-39227", "ACM-39228", "ACM-42875",
-	)
-	if !proxyLabels.MatchesLabelFilter(filter) {
+
+	if _, err := ginkgotypes.ParseLabelFilter(filter); err != nil {
 		return false
 	}
 
-	// Evaluate the exact top-level label set of every non-proxy Describe. This
-	// keeps the normal full-suite setup when a filter also selects any other
-	// spec (including negated filters that select most of the suite).
-	nonProxyLabelSets := []ginkgo.Labels{
-		ginkgo.Label("@e2e", "CLI-Links", TYPE_AWS),
-		ginkgo.Label("e2e", "@non-ui", "RHACM4K-21843", TYPE_AWS),
-		ginkgo.Label("metrics", "@e2e", "@post-upgrade"),
-		ginkgo.Label("@must-gather"),
-		ginkgo.Label(TYPE_KUBEVIRT),
-		ginkgo.Label("e2e", "@non-ui", "ACM-48634"),
-		ginkgo.Label("e2e", labelNodepoolUpgrade, TYPE_AWS),
-		ginkgo.Label("e2e", labelControlPlaneUpgrade, TYPE_AWS),
-		ginkgo.Label("e2e", labelChannelUpgrade, "PR511", "ACM-26476", TYPE_AWS),
-		ginkgo.Label(TYPE_AWS),
+	tokens, ok := labelFilterTokens(filter)
+	if !ok {
+		// Regex filters can match labels that are not explicitly named. Treat
+		// them as mixed/non-proxy filters rather than guessing.
+		return false
 	}
-	for _, labels := range nonProxyLabelSets {
-		if labels.MatchesLabelFilter(filter) {
-			return false
+
+	proxyLabels := make([]string, 0, len(hcpProxyFilterLabels))
+	for label := range hcpProxyFilterLabels {
+		proxyLabels = append(proxyLabels, label)
+	}
+	if !ginkgo.Label(proxyLabels...).MatchesLabelFilter(filter) {
+		return false
+	}
+
+	nonProxyTokens := make([]string, 0)
+	for _, token := range tokens {
+		if !hcpProxyFilterLabels[token] {
+			nonProxyTokens = append(nonProxyTokens, token)
 		}
 	}
+	if nonProxySubsetMatchesFilter(filter, nonProxyTokens) {
+		return false
+	}
 	return true
+}
+
+func labelFilterTokens(filter string) ([]string, bool) {
+	var tokens []string
+	runes := []rune(filter)
+	for i := 0; i < len(runes); {
+		switch runes[i] {
+		case ' ', '\t', '\r', '\n':
+			i++
+		case '&':
+			if i+1 >= len(runes) || runes[i+1] != '&' {
+				return nil, false
+			}
+			i += 2
+		case '|':
+			if i+1 >= len(runes) || runes[i+1] != '|' {
+				return nil, false
+			}
+			i += 2
+		case '!', ',', '(', ')':
+			i++
+		case '/':
+			// A regex can match labels that are not explicitly named. Treat it
+			// as a mixed/non-proxy filter rather than guessing.
+			return nil, false
+		default:
+			start := i
+			for i < len(runes) && !strings.ContainsRune(" \t\r\n&|!,()/", runes[i]) {
+				i++
+			}
+			token := strings.ToLower(strings.TrimSpace(string(runes[start:i])))
+			if token != "" {
+				tokens = append(tokens, token)
+			}
+		}
+	}
+	return tokens, true
+}
+
+func nonProxySubsetMatchesFilter(filter string, tokens []string) bool {
+	// A non-proxy spec may have any subset of the non-proxy labels mentioned by
+	// the filter (and none of the proxy labels). Enumerating those subsets lets
+	// boolean and negated filters be evaluated without hard-coding every
+	// non-proxy describe or It label.
+	if len(tokens) > 20 {
+		return true
+	}
+	for mask := uint64(0); mask < uint64(1)<<len(tokens); mask++ {
+		labels := []string{"__non_proxy__"}
+		for i, token := range tokens {
+			if mask&(uint64(1)<<i) != 0 {
+				labels = append(labels, token)
+			}
+		}
+		if ginkgo.Label(labels...).MatchesLabelFilter(filter) {
+			return true
+		}
+	}
+	return false
 }
 
 func hcpProxyKubeconfigAvailable() bool {
