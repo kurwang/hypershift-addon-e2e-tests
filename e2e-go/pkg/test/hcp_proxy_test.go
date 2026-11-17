@@ -291,18 +291,13 @@ var _ = g.Describe("ACM-38016 HCP proxy integration", g.Label("hcp-proxy", "ACM-
 		expectProxyStatus(status, body, http.StatusConflict)
 
 		otherName := f.name + "-arch"
-		arch := "arm64"
-		version, e := f.spokeK8s.Discovery().ServerVersion()
-		o.Expect(e).NotTo(o.HaveOccurred())
-		if strings.HasSuffix(version.Platform, "/arm64") {
-			arch = "amd64"
-		}
+		arch := f.incompatibleArch()
 		archPath := "/apis/hcp.ocm.io/v1alpha1/namespaces/" + f.ns + "/hostedclusters/" + otherName +
 			"/validate?hostingCluster=" + url.QueryEscape(f.spoke) + "&arch=" + arch
 		status, body = f.request(http.MethodGet, archPath, nil)
 		expectProxyStatus(status, body, http.StatusBadRequest)
-		_, e = f.spokeDyn.Resource(utils.HostedClustersGVR).Namespace(f.ns).Get(context.Background(), otherName, metav1.GetOptions{})
-		o.Expect(apierrors.IsNotFound(e)).To(o.BeTrue(), "validation must not create the HostedCluster: %v", e)
+		_, getErr := f.spokeDyn.Resource(utils.HostedClustersGVR).Namespace(f.ns).Get(context.Background(), otherName, metav1.GetOptions{})
+		o.Expect(apierrors.IsNotFound(getErr)).To(o.BeTrue(), "validation must not create the HostedCluster: %v", getErr)
 	})
 
 	g.It("stops a duplicate-name create during preflight validation", g.Label("ACM-42875"), func() {
